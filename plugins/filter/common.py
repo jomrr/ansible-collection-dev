@@ -1,45 +1,117 @@
 """
 Common filter plugins for Ansible.
 """
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 import yaml
 from ansible.errors import AnsibleFilterError
-from ansible.parsing.yaml.objects import AnsibleUnicode
+from ansible.module_utils.common.text.converters import to_text
 
 
-class MyDumper(yaml.Dumper):
-    """
-    Custom YAML Dumper that increases indentation for nested collections.
-    """
-    def increase_indent(self, flow=False, indentless=False):
+class QuotedString(str):
+    """String value emitted with double quotes."""
+
+
+class LiteralString(str):
+    """Multiline string value emitted as block literal."""
+
+
+class LintableDumper(yaml.SafeDumper):
+    """Safe YAML dumper with ansible-lint friendly indentation."""
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
         return super().increase_indent(flow, False)
 
-def ansible_unicode_representer(dumper, data):
-    return dumper.represent_scalar('tag:yaml.org,2002:str', str(data))
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
 
-# Register the representer with the Dumper
-MyDumper.add_representer(AnsibleUnicode, ansible_unicode_representer)
 
-def to_lintable_yaml(a, indent=2, sort_keys=False):
+def _represent_quoted_string(dumper: yaml.Dumper, data: QuotedString) -> yaml.Node:
+    return dumper.represent_scalar(
+        "tag:yaml.org,2002:str",
+        str(data),
+        style='"',
+    )
+
+
+def _represent_literal_string(dumper: yaml.Dumper, data: LiteralString) -> yaml.Node:
+    return dumper.represent_scalar(
+        "tag:yaml.org,2002:str",
+        str(data),
+        style="|",
+    )
+
+
+LintableDumper.add_representer(QuotedString, _represent_quoted_string)
+LintableDumper.add_representer(LiteralString, _represent_literal_string)
+
+
+def _plain(value: Any) -> Any:
     """
-    An Ansible filter to convert a Python object into a nicely formatted YAML string.
-    Args:
-        a: The Python object to convert.
-        indent: The number of spaces to use for indentation.
+    Convert Ansible/Jinja wrapper objects into plain Python YAML-safe values.
+    """
+    if isinstance(value, Mapping) or hasattr(value, "items"):
+        return {to_text(key): _plain(val) for key, val in value.items()}
 
-    Returns:
-        A YAML string representation of the Python object.
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain(item) for item in value]
+
+    if value is None or isinstance(value, bool | int | float):
+        return value
+
+    return to_text(value)
+
+
+def _prepare(value: Any) -> Any:
+    """
+    Prepare plain Python values for deterministic, lintable YAML output.
+
+    Mapping keys stay plain strings.
+    String values are quoted or emitted as literal blocks.
+    """
+    if isinstance(value, dict):
+        return {str(key): _prepare(val) for key, val in value.items()}
+
+    if isinstance(value, list):
+        return [_prepare(item) for item in value]
+
+    if isinstance(value, str):
+        if "\n" in value:
+            return LiteralString(value)
+        return QuotedString(value)
+
+    return value
+
+
+def to_lintable_yaml(value: Any, indent: int = 2, sort_keys: bool = False) -> str:
+    """
+    Convert any Ansible-renderable value into deterministic, ansible-lint-safe YAML.
     """
     try:
-        return yaml.dump(a, Dumper=MyDumper, default_flow_style=False, indent=indent, sort_keys=sort_keys)
-    except Exception as e:
-        raise AnsibleFilterError("to_lintable_yaml filter plugin error: %s" % str(e)) from e
+        data = _prepare(_plain(value))
+        return yaml.dump(
+            data,
+            Dumper=LintableDumper,
+            default_flow_style=False,
+            indent=indent,
+            sort_keys=sort_keys,
+            allow_unicode=True,
+            width=120,
+        ).rstrip()
+    except Exception as exc:
+        raise AnsibleFilterError(
+            f"to_lintable_yaml filter plugin error: {exc}"
+        ) from exc
 
-class FilterModule():
-    """
-    Defines a filter module class that Ansible will auto-detect and use.
-    """
-    def filters(self):
-        """ Returns a dict mapping filter names to functions. """
+
+class FilterModule:
+    """Ansible filter module."""
+
+    def filters(self) -> dict[str, Any]:
         return {
-            'to_lintable_yaml': to_lintable_yaml
+            "to_lintable_yaml": to_lintable_yaml,
         }
