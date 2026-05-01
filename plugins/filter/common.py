@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import json
 import yaml
 from ansible.errors import AnsibleFilterError
 from ansible.module_utils.common.text.converters import to_text
@@ -92,7 +93,8 @@ def to_lintable_yaml(value: Any, indent: int = 2, sort_keys: bool = False) -> st
     Convert any Ansible-renderable value into deterministic, ansible-lint-safe YAML.
     """
     try:
-        data = _prepare(_plain(value))
+        data = json.loads(json.dumps(_plain(value), default=to_text))
+        data = _prepare(data)
         return yaml.dump(
             data,
             Dumper=LintableDumper,
